@@ -187,8 +187,18 @@ security docs recommend — is a dedicated account with **no `sudo` at all**,
 where log access comes from group membership instead.
 
 Silverblue is immutable at the OS-image level, but `/etc` (users, groups,
-sudoers) is a normal writable overlay, so user management works exactly like any
-Fedora system — no `rpm-ostree` involved.
+sudoers) is a normal writable overlay that persists across upgrades, so nothing
+here needs `rpm-ostree`. Group *membership* is the one place the image/host
+split leaks — see step 2.
+
+[`setup-diag-user.sh`](setup-diag-user.sh) in this repo performs every step
+below, idempotently and in the right order, including the step-2 workaround:
+
+```bash
+./setup-diag-user.sh <admin_user>@<target_host> diag
+```
+
+Read on to do it by hand, or to understand what the script changed.
 
 > **Do these in order.** The key goes in *before* the password comes out. Locking
 > the password first leaves `ssh-copy-id` with nothing to authenticate as, and
@@ -209,7 +219,29 @@ login.
 ### 2. Grant log access by group, not by sudo
 
 ```bash
+# On ostree hosts this first line is mandatory -- see the warning below
+sudo grep -E '^(adm|systemd-journal):' /usr/lib/group | sudo tee -a /etc/group
+
 sudo usermod -a -G adm,systemd-journal diag
+```
+
+> **`usermod` alone silently does nothing here.** The stock groups ship in
+> `/usr/lib/group` and reach lookups via `nss-altfiles`, while `/etc/group`
+> holds only locally-created groups. `usermod` validates the group name through
+> NSS — so it *finds* `adm` — then applies membership by rewriting `/etc/group`,
+> where no `adm` entry exists. It **exits 0 having changed nothing**: no error,
+> no membership, and later a puzzling near-empty `get_journal_logs`. Copying the
+> entry across first is the documented workaround
+> ([rpm-ostree#1318](https://github.com/coreos/rpm-ostree/issues/1318),
+> [issue-tracker#657](https://github.com/fedora-silverblue/issue-tracker/issues/657)).
+> `nsswitch.conf` uses `[SUCCESS=merge]`, so the duplicated entry merges with
+> the `/usr/lib` one rather than shadowing it — the same shape the stock `wheel`
+> group already has on these systems.
+
+Never trust the exit status here; confirm the membership landed:
+
+```bash
+id -nG diag        # must list adm and systemd-journal
 ```
 
 | Group | Grants |
@@ -321,15 +353,32 @@ passes a literal hostname. Set `LINUX_MCP_USER=diag` there instead.
 
 ### 8. Whitelist the readable log files
 
-`read_log_file` refuses every path that is not explicitly listed. This is a
-second, independent restriction layered on top of the Unix permissions, so keep
-the list narrow:
+`read_log_file` refuses every path that is not explicitly listed, and the list
+is **empty by default** — leave the variable unset and every path is refused:
+
+```
+No log files are allowed. Set LINUX_MCP_ALLOWED_LOG_PATHS environment variable
+with comma-separated list of allowed log file paths.
+```
+
+This is an application-level allowlist, wholly independent of Unix permissions.
+Putting `diag` in `adm` opens nothing on its own, and listing a path `diag`
+cannot read still fails — both have to agree.
+
+**On a stock Silverblue host you may not need it at all.** There is no
+`rsyslog`, so `/var/log/messages` and `/var/log/secure` do not exist; journald
+holds everything, and `get_journal_logs` / `get_service_logs` already reach it
+through the step-2 groups. Set the variable only for plain-text logs that
+actually exist on your host, e.g.:
 
 ```json
 "env": {
-  "LINUX_MCP_ALLOWED_LOG_PATHS": "/var/log/messages,/var/log/secure,/var/log/audit/audit.log"
+  "LINUX_MCP_ALLOWED_LOG_PATHS": "/var/log/dnf5.log,/var/log/tuned/tuned.log"
 }
 ```
+
+`/var/log/audit/audit.log` stays root-only even with `adm`, so listing it does
+not make it readable.
 
 Together — group-based log access instead of sudo, a locked key-only account, a
 restricted `authorized_keys` entry, and a curated log whitelist — this gives the
@@ -358,6 +407,8 @@ End-to-end, the server exposes **19 tools** and returns live host data
 | `No such file or directory: '.../id_rsa'` | `HOME` not pointed at the clean directory; asyncssh is reading the real `~/.ssh/config` |
 | `Permission denied (publickey…)` | key not in the host's `authorized_keys`, or wrong SELinux label — check `sudo journalctl -u sshd -n 20` |
 | Connection refused on :22 | `sshd` not running on the host |
+| `get_journal_logs` nearly empty, or `-- No entries --` for `transport="kernel"` | `diag` never joined `adm`/`systemd-journal` — `usermod` exits 0 without doing anything on ostree hosts (step 2). Check `id -nG diag` |
+| A host-side group change appears to have no effect | the server reuses one pooled SSH connection, and supplementary groups are fixed at login. Reconnect the MCP server to force a fresh session |
 | `litellm not installed` at build | dependency list taken from `main` instead of the released sdist's `PKG-INFO` |
 | Server missing in Claude Code | `.mcp.json` is read at startup, and needs `linux-mcp-server` on PATH from the devenv shell |
 
