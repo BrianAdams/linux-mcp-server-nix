@@ -190,6 +190,11 @@ Silverblue is immutable at the OS-image level, but `/etc` (users, groups,
 sudoers) is a normal writable overlay, so user management works exactly like any
 Fedora system — no `rpm-ostree` involved.
 
+> **Do these in order.** The key goes in *before* the password comes out. Locking
+> the password first leaves `ssh-copy-id` with nothing to authenticate as, and
+> you will have removed your only way in before confirming the replacement way
+> in works.
+
 ### 1. Create the account
 
 ```bash
@@ -229,25 +234,64 @@ more (`visudo -f /etc/sudoers.d/diag`):
 diag ALL=(root) NOPASSWD: /usr/bin/journalctl, /usr/sbin/ss, /usr/sbin/dmidecode
 ```
 
-### 3. Lock the account to key-only auth
+### 3. Generate the key and install it
+
+On the machine that will run `linux-mcp-server`:
+
+```bash
+ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519_diag -C "diag@linux-mcp-server"
+```
+
+Installing the public key needs *some* existing way in, and which one you have
+decides the method:
+
+**If password auth is still enabled on the box** — give `diag` a temporary
+password, copy the key over, and remove the password in step 5:
+
+```bash
+sudo passwd diag                                    # on the host, temporary
+ssh-copy-id -i ~/.ssh/id_ed25519_diag.pub diag@<host>
+```
+
+**If password auth is already disabled system-wide** — `ssh-copy-id` has nothing
+to authenticate with, so do not use it. Place the key directly, from the host's
+console or over your own already-authorized admin login:
+
+```bash
+sudo mkdir -p ~diag/.ssh
+sudo tee ~diag/.ssh/authorized_keys <<< 'ssh-ed25519 AAAA... diag@linux-mcp-server'
+sudo chown -R diag:diag ~diag/.ssh
+sudo chmod 700 ~diag/.ssh
+sudo chmod 600 ~diag/.ssh/authorized_keys
+sudo restorecon -R ~diag/.ssh
+```
+
+`restorecon` is not optional on Silverblue — see the SELinux note under
+[One-time host setup](#one-time-host-setup). A mislabelled `authorized_keys` is
+ignored silently, which looks exactly like a rejected key.
+
+### 4. Verify key-based login *before* changing anything else
+
+```bash
+ssh -i ~/.ssh/id_ed25519_diag diag@<host> 'echo success'
+```
+
+Record the host key first if you have not already — the server has no
+interactive prompt to accept an unknown one (same procedure as
+[above](#one-time-host-setup)).
+
+Do not continue until this prints `success`. Everything after this point removes
+a way in.
+
+### 5. Now lock the password
 
 ```bash
 sudo passwd -l diag
 ```
 
-### 4. Install a dedicated key
+Key auth only. This is safe only because step 4 confirmed the key works.
 
-On the machine running `linux-mcp-server`:
-
-```bash
-ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519_diag -C "diag@linux-mcp-server"
-ssh-copy-id -i ~/.ssh/id_ed25519_diag.pub diag@<host>
-```
-
-On Silverblue, run `restorecon -R /home/diag/.ssh` afterwards — see the SELinux
-note under [One-time host setup](#one-time-host-setup).
-
-### 5. Restrict what the key can do
+### 6. Restrict what the key can do
 
 The server only ever runs non-interactive exec commands, so it needs no pty, no
 forwarding, and no X11. Prefix the key in `/home/diag/.ssh/authorized_keys`:
@@ -256,7 +300,10 @@ forwarding, and no X11. Prefix the key in `/home/diag/.ssh/authorized_keys`:
 no-pty,no-port-forwarding,no-x11-forwarding,no-agent-forwarding ssh-ed25519 AAAA... diag@linux-mcp-server
 ```
 
-### 6. Point the server at the account
+Re-run the step 4 check afterwards — a typo in the options list is only visible
+as a failed connection.
+
+### 7. Point the server at the account
 
 Where a writable `~/.ssh/config` is available, a host block is cleaner than
 `LINUX_MCP_USER`, since it scales to more than one target:
@@ -272,14 +319,7 @@ In the container described above this is **not** possible — `~/.ssh/config` is
 mounted read-only, which is precisely why `.mcp.json` sets `LINUX_MCP_USER` and
 passes a literal hostname. Set `LINUX_MCP_USER=diag` there instead.
 
-Verify passwordless access, and record the host key first (same procedure as
-above — the server has no prompt to accept an unknown key):
-
-```bash
-ssh diag@<host> 'echo success'
-```
-
-### 7. Whitelist the readable log files
+### 8. Whitelist the readable log files
 
 `read_log_file` refuses every path that is not explicitly listed. This is a
 second, independent restriction layered on top of the Unix permissions, so keep
