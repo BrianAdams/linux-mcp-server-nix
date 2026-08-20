@@ -144,7 +144,11 @@ Closure is ~794 MB; `litellm` dominates.
 
 ## One-time host setup
 
-Fedora Workstation and Silverblue ship `sshd` **disabled**. On the host:
+Fedora Workstation and Silverblue ship `sshd` **disabled**. The steps below
+authorize your own login user, which is the shortest path to a working
+server. For anything beyond a scratch setup, use the
+[least-privilege diagnostics account](#least-privilege-diagnostics-account)
+instead. On the host:
 
 ```bash
 sudo systemctl enable --now sshd
@@ -174,6 +178,122 @@ ssh-keyscan -t ed25519 169.254.1.2 \
   > ~/.ssh/known_hosts.container
 chmod 600 ~/.ssh/known_hosts.container
 ```
+
+## Least-privilege diagnostics account
+
+The setup above authorizes your own login user, which is convenient but hands
+the agent everything you can do. The better arrangement — and the one upstream's
+security docs recommend — is a dedicated account with **no `sudo` at all**,
+where log access comes from group membership instead.
+
+Silverblue is immutable at the OS-image level, but `/etc` (users, groups,
+sudoers) is a normal writable overlay, so user management works exactly like any
+Fedora system — no `rpm-ostree` involved.
+
+### 1. Create the account
+
+```bash
+sudo useradd -m -s /bin/bash diag
+```
+
+Use a real shell. **`/sbin/nologin` and `/usr/bin/false` break every tool
+call** — the server runs `ssh diag@host "some command"`, which invokes the login
+shell with `-c`, and `nologin` refuses that exactly as it refuses an interactive
+login.
+
+### 2. Grant log access by group, not by sudo
+
+```bash
+sudo usermod -a -G adm,systemd-journal diag
+```
+
+| Group | Grants |
+|---|---|
+| `systemd-journal` | reading `journalctl` output |
+| `adm` | reading the traditional log files under `/var/log` |
+
+Membership takes effect on the next SSH session; no reboot needed for a service
+account.
+
+**The ceiling on this approach**, worth knowing before you debug a confusing
+empty result: a few things still need root even with those groups —
+audit-backend journal queries (`get_journal_logs` with `transport="audit"`),
+full `ss`/netstat output showing every process, and `dmidecode`-based hardware
+info. Those tools return partial output rather than failing loudly.
+
+That is usually the right trade for a read-only diagnostics account. If you
+genuinely need them, scope passwordless sudo to those exact binaries and nothing
+more (`visudo -f /etc/sudoers.d/diag`):
+
+```
+diag ALL=(root) NOPASSWD: /usr/bin/journalctl, /usr/sbin/ss, /usr/sbin/dmidecode
+```
+
+### 3. Lock the account to key-only auth
+
+```bash
+sudo passwd -l diag
+```
+
+### 4. Install a dedicated key
+
+On the machine running `linux-mcp-server`:
+
+```bash
+ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519_diag -C "diag@linux-mcp-server"
+ssh-copy-id -i ~/.ssh/id_ed25519_diag.pub diag@<host>
+```
+
+On Silverblue, run `restorecon -R /home/diag/.ssh` afterwards — see the SELinux
+note under [One-time host setup](#one-time-host-setup).
+
+### 5. Restrict what the key can do
+
+The server only ever runs non-interactive exec commands, so it needs no pty, no
+forwarding, and no X11. Prefix the key in `/home/diag/.ssh/authorized_keys`:
+
+```
+no-pty,no-port-forwarding,no-x11-forwarding,no-agent-forwarding ssh-ed25519 AAAA... diag@linux-mcp-server
+```
+
+### 6. Point the server at the account
+
+Where a writable `~/.ssh/config` is available, a host block is cleaner than
+`LINUX_MCP_USER`, since it scales to more than one target:
+
+```
+Host diag-host
+  HostName silverblue-host.example.com
+  User diag
+  IdentityFile ~/.ssh/id_ed25519_diag
+```
+
+In the container described above this is **not** possible — `~/.ssh/config` is
+mounted read-only, which is precisely why `.mcp.json` sets `LINUX_MCP_USER` and
+passes a literal hostname. Set `LINUX_MCP_USER=diag` there instead.
+
+Verify passwordless access, and record the host key first (same procedure as
+above — the server has no prompt to accept an unknown key):
+
+```bash
+ssh diag@<host> 'echo success'
+```
+
+### 7. Whitelist the readable log files
+
+`read_log_file` refuses every path that is not explicitly listed. This is a
+second, independent restriction layered on top of the Unix permissions, so keep
+the list narrow:
+
+```json
+"env": {
+  "LINUX_MCP_ALLOWED_LOG_PATHS": "/var/log/messages,/var/log/secure,/var/log/audit/audit.log"
+}
+```
+
+Together — group-based log access instead of sudo, a locked key-only account, a
+restricted `authorized_keys` entry, and a curated log whitelist — this gives the
+account everything the read-only tools need without ever handing out root.
 
 ## Verifying
 
