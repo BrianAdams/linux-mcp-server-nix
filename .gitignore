@@ -12,6 +12,11 @@
 /devenv.yaml
 /devenv.lock
 
+# local machine-specific config -- absolute paths, not portable.
+# copy .mcp.json.example -> .mcp.json and edit for your machine
+/.mcp.json
+/devenv.local.nix
+
 # agent sandbox / editor local state
 /.ai-sandbox/
 /.claude/settings.local.json

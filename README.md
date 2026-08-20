@@ -42,17 +42,33 @@ nix profile install .#              # e.g. on the host itself
 |---|---|
 | `flake.nix` | `packages.default` / `.linux-mcp-server` / `.linux-mcp-server-gssapi`, `apps.default`, `overlays.default`, `checks`, `formatter` |
 | `package.nix` | the derivation — pinned PyPI sdist, `withGssapi` flag |
-| `devenv.local.nix` | puts the binary on PATH in the devenv shell, via the same `package.nix` |
-| `.mcp.json` | registers the server with Claude Code as `linux` |
+| `.mcp.json.example` | template for the Claude Code registration — copy to `.mcp.json` |
+| `setup-diag-user.sh` | bootstraps the least-privilege `diag` account on a target host |
 
-`devenv.local.nix` is the extension point: the `devenv.nix` in this directory is
-bind-mounted read-only from `devenv-base` and must not be edited (it is
-gitignored for that reason). devenv auto-imports `devenv.local.nix` alongside
-it, so the baseline toolchain stays intact.
+**`.mcp.json` and `devenv.local.nix` are local and gitignored.** Both carry
+absolute paths that are valid on exactly one machine, so neither is checked in.
+Create them after cloning:
+
+```bash
+cp .mcp.json.example .mcp.json     # then correct the paths for your machine
+```
+
+`devenv.local.nix` is the devenv extension point: the `devenv.nix` in this
+directory is bind-mounted read-only from `devenv-base` and must not be edited
+(gitignored for the same reason). devenv auto-imports `devenv.local.nix`
+alongside it, so the baseline toolchain stays intact. A minimal one that puts
+the binary on PATH, built from the same `package.nix` the flake exposes:
+
+```nix
+{ pkgs, ... }:
+{
+  packages = [ (pkgs.callPackage ./package.nix { }) ];
+}
+```
 
 ## Configuration
 
-`.mcp.json` carries the authoritative environment:
+Your local `.mcp.json` carries the authoritative environment:
 
 | Variable | Value | Why |
 |---|---|---|

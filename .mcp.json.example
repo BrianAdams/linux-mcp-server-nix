@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "linux": {
+      "command": "linux-mcp-server",
+      "args": [],
+      "env": {
+        "LINUX_MCP_USER": "diag",
+        "LINUX_MCP_KNOWN_HOSTS_PATH": "/home/YOUR_USER/.ssh/known_hosts.container",
+        "LINUX_MCP_LOG_DIR": "/home/YOUR_USER/.local/share/linux-mcp-server/logs",
+        "SSH_AUTH_SOCK": "/run/ssh-agent.sock",
+        "HOME": "/home/YOUR_USER/.local/share/linux-mcp-server/home"
+      }
+    }
+  }
+}
