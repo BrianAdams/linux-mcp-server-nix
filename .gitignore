@@ -1,0 +1,18 @@
+# nix build outputs
+/result
+/result-*
+
+# devenv state
+/.devenv/
+/.devenv.flake.nix
+/.devenv-base-seeded
+
+# bind-mounted read-only from devenv-base at container launch; not project-owned
+/devenv.nix
+/devenv.yaml
+/devenv.lock
+
+# agent sandbox / editor local state
+/.ai-sandbox/
+/.claude/settings.local.json
+/.eva/
